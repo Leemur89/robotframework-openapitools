@@ -1,7 +1,7 @@
 """Module for helper methods and classes used by the openapi_executors module."""
 
 from dataclasses import dataclass
-from importlib import import_module
+from importlib import import_module, reload
 from logging import getLogger
 from typing import Callable, Dict, Tuple, Type, Union
 
@@ -30,6 +30,7 @@ class get_dto_class:
     def __init__(self, mappings_module_name: str) -> None:
         try:
             mappings_module = import_module(mappings_module_name)
+            reload(mappings_module)
             self.dto_mapping: Dict[Tuple[str, str], Type[Dto]] = (
                 mappings_module.DTO_MAPPING
             )
