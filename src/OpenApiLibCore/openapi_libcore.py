@@ -712,7 +712,7 @@ class OpenApiLibCore:  # pylint: disable=too-many-instance-attributes
                     json_type: _json.loads for json_type in json_types_from_spec
                 }
                 config = Config(extra_media_type_deserializers=extra_deserializers)
-                openapi = OpenAPI(spec=validation_spec, config=config)
+                openapi = OpenAPI(spec=validation_spec, config=None)
                 response_validator = openapi.validate_response
 
                 PARSER_CACHE[self._source] = (
