@@ -97,6 +97,11 @@
 <type name="Union" union="true">Dict[str, str] | None<type name="Dict" typedoc="dictionary">Dict[str, str]<type name="str" typedoc="string">str</type><type name="str" typedoc="string">str</type></type><type name="None" typedoc="None">None</type></type>
 <default>None</default>
 </arg>
+<arg kind="POSITIONAL_OR_NAMED" required="false" repr="log_suite_variables: bool = False">
+<name>log_suite_variables</name>
+<type name="bool" typedoc="boolean">bool</type>
+<default>False</default>
+</arg>
 </arguments>
 <doc>&lt;h3&gt;Base parameters&lt;/h3&gt;
 &lt;h4&gt;source&lt;/h4&gt;
@@ -115,6 +120,8 @@
 &lt;p&gt;If different property names are used for the unique identifier for different types of resources, an &lt;code&gt;ID_MAPPING&lt;/code&gt; can be implemented using the &lt;code&gt;mappings_path&lt;/code&gt;.&lt;/p&gt;
 &lt;h4&gt;faker_locale&lt;/h4&gt;
 &lt;p&gt;A locale string or list of locale strings to pass to the Faker library to be used in generation of string data for supported format types.&lt;/p&gt;
+&lt;h4&gt;log_suite_variables&lt;/h4&gt;
+&lt;p&gt;By setting this boolean to True, all performed requests and response will be available in suite variable OPENAPI_DRIVER_REQUESTS and all created data in OPENAPI_DRIVER_CREATED_DATA (default False)&lt;/p&gt;
 &lt;h3&gt;Parsing parameters&lt;/h3&gt;
 &lt;h4&gt;recursion_limit&lt;/h4&gt;
 &lt;p&gt;The recursion depth to which to fully parse recursive references before the &lt;span class="name"&gt;recursion_default&lt;/span&gt; is used to end the recursion.&lt;/p&gt;
