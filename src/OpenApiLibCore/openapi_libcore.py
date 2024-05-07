@@ -127,11 +127,22 @@ from functools import cached_property
 from itertools import zip_longest
 from logging import getLogger
 from pathlib import Path
-from random import choice
-from typing import Any, Dict, List, Optional, Set, Tuple, Type, Union
+from random import choice, sample
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Generator,
+    List,
+    Optional,
+    Set,
+    Tuple,
+    Type,
+    Union,
+)
 from uuid import uuid4
 
-from openapi_core import Spec, validate_response
+from openapi_core import Config, OpenAPI, Spec
 from openapi_core.contrib.requests import (
     RequestsOpenAPIRequest,
     RequestsOpenAPIResponse,
@@ -357,6 +368,33 @@ class RequestData:
             if key in required_properties:
                 required_properties_dict[key] = value
         return required_properties_dict
+
+    def get_minimal_body_dict(self) -> Dict[str, Any]:
+        required_properties_dict = self.get_required_properties_dict()
+
+        min_properties = self.dto_schema.get("minProperties", 0)
+        number_of_optional_properties_to_add = min_properties - len(
+            required_properties_dict
+        )
+
+        if number_of_optional_properties_to_add < 1:
+            return required_properties_dict
+
+        optional_properties_dict = {
+            k: v
+            for k, v in self.dto.as_dict().items()
+            if k not in required_properties_dict
+        }
+        optional_properties_to_keep = sample(
+            sorted(optional_properties_dict), number_of_optional_properties_to_add
+        )
+        optional_properties_dict = {
+            k: v
+            for k, v in optional_properties_dict.items()
+            if k in optional_properties_to_keep
+        }
+
+        return {**required_properties_dict, **optional_properties_dict}
 
     def get_required_params(self) -> Dict[str, str]:
         """Get the params dict containing only the required query parameters."""
@@ -588,7 +626,8 @@ class OpenApiLibCore:  # pylint: disable=too-many-instance-attributes
 
     @cached_property
     def validation_spec(self) -> Spec:
-        return Spec.from_dict(self.openapi_spec)
+        _, validation_spec, _ = self._load_specs_and_validator()
+        return validation_spec
 
     @property
     def openapi_spec(self) -> Dict[str, Any]:
@@ -598,13 +637,43 @@ class OpenApiLibCore:  # pylint: disable=too-many-instance-attributes
 
     @cached_property
     def _openapi_spec(self) -> Dict[str, Any]:
-        parser = self._load_parser()
+        parser, _, _ = self._load_specs_and_validator()
         return parser.specification
 
-    def read_paths(self) -> Dict[str, Any]:
-        return self.openapi_spec["paths"]
+    @cached_property
+    def response_validator(
+        self,
+    ) -> Callable[[RequestsOpenAPIRequest, RequestsOpenAPIResponse], None]:
+        _, _, response_validator = self._load_specs_and_validator()
+        return response_validator
 
-    def _load_parser(self) -> ResolvingParser:
+    def _get_json_types_from_spec(self, spec: Dict[str, Any]) -> Set[str]:
+        json_types: Set[str] = set(self._get_json_types(spec))
+        return {json_type for json_type in json_types if json_type is not None}
+
+    def _get_json_types(self, item: Any) -> Generator[str, None, None]:
+        if isinstance(item, dict):
+            content_dict = item.get("content")
+            if content_dict is None:
+                for value in item.values():
+                    yield from self._get_json_types(value)
+
+            else:
+                for content_type in content_dict:
+                    if "json" in content_type:
+                        yield content_type
+
+        if isinstance(item, list):
+            for list_item in item:
+                yield from self._get_json_types(list_item)
+
+    def _load_specs_and_validator(
+        self,
+    ) -> Tuple[
+        ResolvingParser,
+        Spec,
+        Callable[[RequestsOpenAPIRequest, RequestsOpenAPIResponse], None],
+    ]:
         try:
 
             def recursion_limit_handler(
@@ -617,7 +686,10 @@ class OpenApiLibCore:  # pylint: disable=too-many-instance-attributes
             # will have a global scope due to how the Python import system works. This
             # ensures that in a Suite of Suites where multiple Suites use the same
             # `source`, that OAS is only parsed / loaded once.
-            parser = PARSER_CACHE.get(self._source, None)
+            parser, validation_spec, response_validator = PARSER_CACHE.get(
+                self._source, (None, None, None)
+            )
+
             if parser is None:
                 parser = ResolvingParser(
                     self._source,
@@ -631,9 +703,25 @@ class OpenApiLibCore:  # pylint: disable=too-many-instance-attributes
                         "Source was loaded, but no specification was present after parsing."
                     )
 
-                PARSER_CACHE[self._source] = parser
+                validation_spec = Spec.from_dict(parser.specification)
 
-            return parser
+                json_types_from_spec: Set[str] = self._get_json_types_from_spec(
+                    parser.specification
+                )
+                extra_deserializers = {
+                    json_type: _json.loads for json_type in json_types_from_spec
+                }
+                config = Config(extra_media_type_deserializers=extra_deserializers)
+                openapi = OpenAPI(spec=validation_spec, config=config)
+                response_validator = openapi.validate_response
+
+                PARSER_CACHE[self._source] = (
+                    parser,
+                    validation_spec,
+                    response_validator,
+                )
+
+            return parser, validation_spec, response_validator
 
         except ResolutionError as exception:
             BuiltIn().fatal_error(
@@ -651,11 +739,10 @@ class OpenApiLibCore:  # pylint: disable=too-many-instance-attributes
         Validate the reponse for a given request against the OpenAPI Spec that is
         loaded during library initialization.
         """
-        _ = validate_response(
-            spec=self.validation_spec,
-            request=request,
-            response=response,
-        )
+        self.response_validator(request=request, response=response)
+
+    def read_paths(self) -> Dict[str, Any]:
+        return self.openapi_spec["paths"]
 
     @keyword
     def get_valid_url(self, endpoint: str, method: str) -> str:
@@ -1101,19 +1188,45 @@ class OpenApiLibCore:  # pylint: disable=too-many-instance-attributes
 
         json_data: Dict[str, Any] = {}
 
+        property_names = []
         for property_name in schema.get("properties", []):
-            properties_schema = schema["properties"][property_name]
-
-            property_type = properties_schema.get("type")
-            if not property_type:
-                selected_type_schema = choice(properties_schema["types"])
-                property_type = selected_type_schema["type"]
-            if properties_schema.get("readOnly", False):
-                continue
             if constrained_values := get_constrained_values(property_name):
                 # do not add properties that are configured to be ignored
                 if IGNORE in constrained_values:
                     continue
+            property_names.append(property_name)
+
+        max_properties = schema.get("maxProperties")
+        if max_properties and len(property_names) > max_properties:
+            required_properties = schema.get("required", [])
+            number_of_optional_properties = max_properties - len(required_properties)
+            optional_properties = [
+                name for name in property_names if name not in required_properties
+            ]
+            selected_optional_properties = sample(
+                optional_properties, number_of_optional_properties
+            )
+            property_names = required_properties + selected_optional_properties
+
+        for property_name in property_names:
+            properties_schema = schema["properties"][property_name]
+
+            property_type = properties_schema.get("type")
+            if property_type is None:
+                property_types = properties_schema.get("types")
+                if property_types is None:
+                    if properties_schema.get("properties") is not None:
+                        nested_data = self.get_json_data_for_dto_class(
+                            schema=properties_schema,
+                            dto_class=DefaultDto,
+                        )
+                        json_data[property_name] = nested_data
+                        continue
+                selected_type_schema = choice(property_types)
+                property_type = selected_type_schema["type"]
+            if properties_schema.get("readOnly", False):
+                continue
+            if constrained_values := get_constrained_values(property_name):
                 json_data[property_name] = choice(constrained_values)
                 continue
             if (
@@ -1140,6 +1253,7 @@ class OpenApiLibCore:  # pylint: disable=too-many-instance-attributes
                 json_data[property_name] = [array_data]
                 continue
             json_data[property_name] = value_utils.get_valid_value(properties_schema)
+
         return json_data
 
     @keyword
